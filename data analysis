@@ -1,0 +1,193 @@
+library(SingleCellExperiment)
+library(scater)
+options(stringsAsFactors = FALSE)
+
+setwd("/zs32/home/jcdai/03R/08organoid/01GSE75140")
+data<-read.table("GSE75140_hOrg.fetal.master.data.frame.txt",sep="\t",header=T,row.names=1)
+dim(data)
+#[1]   734 18928
+data<-data[,-18928]
+anno<-read.csv("annotation.csv",header=T,row.names=1)
+head(anno)
+                   # BrainType BrainAge batch
+# A1_fetal_12wpc_c1      fetal    12wpc     1
+# A1_fetal_12wpc_c2      fetal    12wpc     2
+# A10_fetal_12wpc_c1     fetal    12wpc     1
+# A10_fetal_12wpc_c2     fetal    12wpc     2
+# A11_fetal_12wpc_c1     fetal    12wpc     1
+# A11_fetal_12wpc_c2     fetal    12wpc     2
+a<-intersect(rownames(anno),rownames(data))
+anno1<-anno[a,]
+data1<-data[a,]
+#F5_fetal_13wpc在data中为NA值
+v<-log2(data1+1)
+v2<-t(v)
+data2<-t(data1)
+sce<-SingleCellExperiment(assays=list(counts_row=data2,logcounts_row=v2),colData=anno1)
+sce
+# class: SingleCellExperiment 
+# dim: 18927 733 
+# metadata(0):
+# assays(2): counts logcounts
+# rownames(18927): A1BG A1CF ... ZZEF1 ZZZ3
+# rowData names(0):
+# colnames(733): A1_fetal_12wpc_c1 A1_fetal_12wpc_c2 ... H7_hOrg65d
+  # H9_hOrg65d
+# colData names(3): BrainType BrainAge batch
+# reducedDimNames(0):
+# spikeNames(0):
+keep_feature <- rowSums(counts(sce) > 0) > 0
+sce <- sce[keep_feature, ]
+#spike-in
+isSpike(sce, "ERCC") <- grepl("^ERCC", rownames(sce))
+sce <- calculateQCMetrics(sce,feature_controls = list(ERCC = isSpike(sce, "ERCC")))
+
+
+
+##cell qc
+#1
+pdf("totalcount.pdf")
+hist(sce$total_counts,breaks = 100)
+#abline(v=10000,col="red")
+dev.off()
+filter_by_total_counts<-sce$total_counts>10000
+table(filter_by_total_counts)
+# filter_by_total_counts
+# FALSE  TRUE 
+# 47   686 
+#2
+pdf("totalfeature.pdf")
+hist(sce$total_features,breaks = 100)
+#abline(v = 2000, col = "red")
+dev.off()
+filter_by_expr_features<-sce$total_features>2000
+table(filter_by_expr_features)
+# filter_by_expr_features
+# FALSE  TRUE 
+# 29   704 
+sce$use<-(filter_by_total_counts & filter_by_expr_features)
+table(sce$use)
+# FALSE  TRUE 
+   # 48   685 
+
+
+
+##PCA
+#plotPCA的代码都没有了   
+pdf("pca.pdf")
+example_sce<-plotPCA(sce,size_by="total_features",shape_by="use",pca_data_input="pdata",detect_outliers=TRUE,return_SCE=TRUE)
+dev.off()
+
+
+##plotQC
+#gene expression qc
+pdf("highexpression.pdf")
+plotQC(sce, type = "highest-expression")
+dev.off()
+
+pdf("findpc.pdf")
+plotQC(sce, type = "find-pcs")
+dev.off()
+
+pdf("explanatoryvariables.pdf")
+plotQC(sce, type = "explanatory-variables")
+dev.off()
+
+
+##gene filtering
+filter_genes <- apply(counts(sce[,colData(sce)$use]),1,function(x){length(x[x > 1]) >= 2})
+rowData(sce)$use <- filter_genes
+table(filter_genes)
+# filter_genes
+# FALSE  TRUE 
+ # 1264 15509 
+
+#save data
+dim(sce[rowData(sce)$use, colData(sce)$use])
+#[1] 15509   685
+reducedDim(sce) <- NULL
+saveRDS(sce, file = "sce0226.rds")
+#load data
+sce<-readRDs("sce0226.rds")
+sce.qc <- sce[rowData(sce)$use, colData(sce)$use]
+endog_genes <- !rowData(sce.qc)$is_feature_control
+
+#PCA
+#这里的差异有用count计算和log2计算，我选择用count
+pdf("pca_beforeqc_count.pdf")
+plotPCA(sce[endog_genes, ],exprs_values = "counts",colour_by = "batch",size_by = "total_features",shape_by="BrainType")
+dev.off()
+pdf("pca_beforeqc_log.pdf")
+plotPCA(sce[endog_genes, ],exprs_values = "logcounts",colour_by = "batch",size_by = "total_features",shape_by="BrainType")
+dev.off()
+pdf("pca_afterqc_count.pdf")
+plotPCA(sce.qc[endog_genes, ],exprs_values = "counts",colour_by = "batch",size_by = "total_features",shape_by="BrainType")
+dev.off()
+pdf("pca_afterqc_log.pdf")
+plotPCA(sce.qc[endog_genes, ],exprs_values = "logcounts",colour_by = "batch",size_by = "total_features",shape_by="BrainType")
+dev.off()
+
+#tSNE
+pdf("tsne_beforeqc_log.pdf")
+plotTSNE(sce[endog_genes, ], exprs_values = "logcounts", perplexity = 130, colour_by = "batch",size_by = "total_features", shape_by = "BrainType", rand_seed = 123456)
+dev.off()
+#Error in loadNamespace(name) : there is no package called 釸tsne?
+
+#normalize
+#CPM (FPKM也有)
+calc_cpm <-
+function (expr_mat, spikes = NULL) 
+{
+    norm_factor <- colSums(expr_mat[-spikes, ])
+    return(t(t(expr_mat)/norm_factor)) * 10^6
+}
+
+counts(sce.qc) <- calculateCPM(sce.qc, use.size.factors = FALSE)
+pdf("pca_cpm.pdf")
+plotPCA(sce.qc[endog_genes, ],colour_by = "batch",size_by = "total_features",shape_by = "BrainType")
+dev.off()
+pdf("RLE_cpm.pdf")
+plotRLE(
+    sce.qc[endog_genes, ], 
+    exprs_mats = list(Raw = "logcounts", CPM = "counts"),
+    exprs_logged = c(TRUE, TRUE),
+    colour_by = "batch"
+)
+dev.off()
+
+
+
+
+
+#batch
+library(scRNA.seq.funcs)
+library(RUVSeq)
+library(scater)
+library(SingleCellExperiment)
+library(scran)
+library(kBET)
+library(sva) # Combat
+library(edgeR)
+set.seed(1234567)
+options(stringsAsFactors = FALSE)
+sce <- readRDS("sce0226.rds")
+sce.qc <- sce[rowData(sce)$use, colData(sce)$use]
+endog_genes <- !rowData(sce.qc)$is_feature_control
+erccs <- rowData(sce.qc)$is_feature_control
+# qclust <- quickCluster(sce.qc, min.size = 30)
+# sce.qc <- computeSumFactors(sce.qc, sizes = 15, clusters = qclust)
+ sce.qc <- normalize(sce.qc)
+
+#combat
+combat_data <- counts(sce.qc)
+mod_data <- as.data.frame(t(combat_data))
+mod0 = model.matrix(~ 1, data = mod_data) 
+mod1 = model.matrix(~ sce.qc$BrainAge, data = mod_data)
+mod2 = model.matrix(~ sce.qc$total_features, data = mod_data)
+assay(sce.qc, "combat") <- ComBat(
+    dat = t(mod_data), 
+    batch = factor(sce.qc$batch), 
+    mod = mod0,
+    par.prior = TRUE,
+    prior.plots = FALSE
+)
